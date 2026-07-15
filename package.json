@@ -1,0 +1,10 @@
+{
+  "name": "npoint-proxy",
+  "version": "1.0.0",
+  "description": "nPoint proxy for Netlify Functions",
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "serverless-http": "^3.2.0"
+  }
+}
