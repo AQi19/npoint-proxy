@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>白名单追加器 (Netlify)</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f5f7fc; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+        .card { background: white; border-radius: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.08); padding: 40px 36px; width: 100%; max-width: 480px; }
+        h1 { font-size: 24px; font-weight: 600; color: #1a2634; margin-bottom: 8px; }
+        .subtitle { color: #6b7a8f; font-size: 14px; margin-bottom: 28px; border-left: 3px solid #4f8cf7; padding-left: 14px; background: #f0f4fe; border-radius: 0 8px 8px 0; line-height: 1.6; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; font-weight: 500; color: #2c3e50; margin-bottom: 6px; font-size: 14px; }
+        input { width: 100%; padding: 12px 16px; border: 1.5px solid #e2e8f0; border-radius: 12px; font-size: 15px; transition: border 0.2s; background: #fafbff; }
+        input:focus { outline: none; border-color: #4f8cf7; box-shadow: 0 0 0 3px rgba(79,140,247,0.15); background: white; }
+        .btn { width: 100%; padding: 14px; background: #4f8cf7; color: white; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; margin-top: 6px; }
+        .btn:hover { background: #3a78e0; }
+        .btn:disabled { background: #a0b8d9; cursor: not-allowed; opacity: 0.7; }
+        .status { margin-top: 24px; padding: 14px 18px; border-radius: 12px; background: #f8faff; border: 1px solid #e9edf4; font-size: 14px; color: #1e293b; display: flex; align-items: center; gap: 10px; min-height: 54px; word-break: break-word; }
+        .status .spinner { display: inline-block; width: 18px; height: 18px; border: 2.5px solid #d0d9e8; border-top-color: #4f8cf7; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .status.success { background: #edf7ed; border-color: #b8d9b8; color: #1f6b1f; }
+        .status.error { background: #fde8e8; border-color: #f5c2c2; color: #a13030; }
+        .status.idle { background: #f8faff; border-color: #e9edf4; color: #5d6f83; }
+        .footer { margin-top: 24px; font-size: 12px; color: #8a9bb0; text-align: center; border-top: 1px solid #eef2f8; padding-top: 18px; }
+        .footer code { background: #eef2f8; padding: 2px 8px; border-radius: 6px; font-family: monospace; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>📋 白名单追加 (Netlify)</h1>
+    <div class="subtitle">通过 Netlify 函数代理 nPoint 文档 <code>d530...</code></div>
+    <div class="form-group">
+        <label for="nameInput">👤 姓名</label>
+        <input type="text" id="nameInput" placeholder="张三">
+    </div>
+    <div class="form-group">
+        <label for="phoneInput">📱 手机号</label>
+        <input type="tel" id="phoneInput" placeholder="13800138000">
+    </div>
+    <button class="btn" id="submitBtn">提交</button>
+    <div class="status idle" id="statusDisplay"><span>💡 等待操作…</span></div>
+    <div class="footer">部署于 Netlify Functions · 文档 ID <code>d530963c2b4e70a7b4e6</code></div>
+</div>
+
+<script>
+    const statusEl = document.getElementById('statusDisplay');
+    const submitBtn = document.getElementById('submitBtn');
+    const nameInput = document.getElementById('nameInput');
+    const phoneInput = document.getElementById('phoneInput');
+
+    function setStatus(message, type = 'idle', showSpinner = false) {
+        statusEl.className = `status ${type}`;
+        let content = '';
+        if (showSpinner) content += `<span class="spinner"></span>`;
+        content += `<span>${message}</span>`;
+        statusEl.innerHTML = content;
+    }
+    function setLoading(msg) { setStatus(msg, 'idle', true); submitBtn.disabled = true; }
+    function setSuccess(msg) { setStatus(msg, 'success', false); submitBtn.disabled = false; }
+    function setError(msg) { setStatus(`❌ ${msg}`, 'error', false); submitBtn.disabled = false; }
+    function setIdle(msg = '💡 等待操作…') { setStatus(msg, 'idle', false); submitBtn.disabled = false; }
+
+    async function init() {
+        try {
+            const resp = await fetch('/api/init');
+            const result = await resp.json();
+            if (!result.success) throw new Error(result.message);
+            console.log('✅ 初始化成功');
+        } catch (err) {
+            console.warn('初始化失败（不影响提交）:', err.message);
+        }
+    }
+    init();
+
+    async function handleSubmit() {
+        const name = nameInput.value.trim();
+        const phone = phoneInput.value.trim();
+        if (!name) { setError('请输入姓名'); nameInput.focus(); return; }
+        if (!phone) { setError('请输入手机号'); phoneInput.focus(); return; }
+        if (!/^[\d\-+ ]{7,15}$/.test(phone)) { setError('手机号格式不正确'); return; }
+
+        submitBtn.disabled = true;
+        setLoading('⏳ 正在提交…');
+
+        try {
+            const resp = await fetch('/api/append', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, phone }),
+            });
+            const result = await resp.json();
+            if (!result.success) throw new Error(result.message);
+            setSuccess(`✅ 成功追加 “${name}” (${phone})`);
+            nameInput.value = '';
+            phoneInput.value = '';
+            nameInput.focus();
+        } catch (err) {
+            setError(`提交失败: ${err.message}`);
+        } finally {
+            submitBtn.disabled = false;
+        }
+    }
+
+    submitBtn.addEventListener('click', handleSubmit);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.target === nameInput || e.target === phoneInput)) {
+            e.preventDefault();
+            submitBtn.click();
+        }
+    });
+</script>
+</body>
+</html>
