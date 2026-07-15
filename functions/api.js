@@ -13,8 +13,11 @@ const CONFIG = {
 };
 
 let csrfToken = '';
+let cachedContents = null;
+let cachedOriginalContents = '';
 
 async function login() {
+    console.log('🔐 登录 nPoint...');
     const resp = await fetch(`${CONFIG.baseUrl}/users/sign_in`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -27,107 +30,127 @@ async function login() {
     const token = resp.headers.get('x-csrf-token');
     if (!token) throw new Error('登录响应中缺少 x-csrf-token');
     csrfToken = token;
+    console.log('✅ 登录成功');
     return token;
 }
 
-// ---------- 初始化 ----------
+async function fetchDocument(useCache = true) {
+    if (useCache && cachedContents && cachedOriginalContents) {
+        console.log('📦 使用缓存文档');
+        return { contents: cachedContents, originalContents: cachedOriginalContents };
+    }
+    console.log('📥 从 nPoint 获取文档...');
+    const resp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
+        headers: { 'x-csrf-token': csrfToken, 'Accept': 'application/json' },
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`获取文档失败 (${resp.status}): ${text}`);
+    }
+    const data = await resp.json();
+    const contents = data.contents || { whitelist: [] };
+    const originalContents = data.original_contents || '';
+    cachedContents = contents;
+    cachedOriginalContents = originalContents;
+    return { contents, originalContents };
+}
+
 app.get('/api/init', async (req, res) => {
     try {
-        await login();
-        const docResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
-            headers: { 'x-csrf-token': csrfToken, 'Accept': 'application/json' },
-        });
-        if (!docResp.ok) {
-            const text = await docResp.text();
-            throw new Error(`获取文档失败 (${docResp.status}): ${text}`);
-        }
-        const data = await docResp.json();
-        res.json({ success: true, data });
+        if (!csrfToken) await login();
+        await fetchDocument(false);
+        res.json({ success: true, message: '初始化完成' });
     } catch (err) {
+        console.error('初始化错误:', err.message);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// ---------- 追加白名单（含重试） ----------
 app.post('/api/append', async (req, res) => {
     const { name, phone } = req.body;
     if (!name || !phone) {
         return res.status(400).json({ success: false, message: '姓名和手机号不能为空' });
     }
 
-    // 核心操作函数，可重复调用
-    async function performAppend(attempt = 1) {
-        // 如果 token 不存在，先登录
-        if (!csrfToken) await login();
-
-        // 1. 获取当前文档
-        const getResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
-            headers: { 'x-csrf-token': csrfToken, 'Accept': 'application/json' },
-        });
-        if (!getResp.ok) {
-            const text = await getResp.text();
-            throw new Error(`获取文档失败 (${getResp.status}): ${text}`);
-        }
-        const doc = await getResp.json();
-        const contents = doc.contents || { whitelist: [] };
-        const originalContents = doc.original_contents || '';
-
-        if (!Array.isArray(contents.whitelist)) contents.whitelist = [];
-        contents.whitelist.push({
-            name,
-            phone,
-            timestamp: new Date().toISOString(),
-        });
-
-        const newContentsStr = JSON.stringify(contents);
-        const payload = {
-            contents: newContentsStr,
-            original_contents: originalContents,
-            schema: null,
-            original_schema: '',
-        };
-
-        // 2. 更新文档
-        const patchResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
-            method: 'PATCH',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'x-csrf-token': csrfToken,
-            },
-            body: JSON.stringify(payload),
-        });
-        if (!patchResp.ok) {
-            const text = await patchResp.text();
-            throw new Error(`更新失败 (${patchResp.status}): ${text}`);
-        }
-        const result = await patchResp.json();
-        return result;
-    }
+    // 整体超时 28 秒（略低于 Netlify 的 30 秒限制）
+    const TIMEOUT_MS = 28000;
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('处理超时，请立即重试一次')), TIMEOUT_MS)
+    );
 
     try {
-        const result = await performAppend();
+        const result = await Promise.race([
+            performAppend(name, phone),
+            timeoutPromise
+        ]);
         res.json({ success: true, data: result });
     } catch (err) {
-        // 如果错误是认证相关 (401 或 CSRF)，尝试重新登录并重试一次
-        const errMsg = err.message;
-        if (errMsg.includes('401') || errMsg.includes('CSRF') || errMsg.includes('获取文档失败')) {
-            try {
-                console.log('认证失败，重新登录并重试...');
-                await login(); // 重新登录
-                // 重试一次
-                const result = await performAppend();
-                res.json({ success: true, data: result });
-                return;
-            } catch (retryErr) {
-                // 重试仍然失败，返回错误
-                res.status(500).json({ success: false, message: `重试失败: ${retryErr.message}` });
-                return;
-            }
+        console.error('append 错误:', err.message);
+        if (err.message.includes('超时')) {
+            res.status(504).json({
+                success: false,
+                message: '⏳ 处理超时（冷启动较慢），请立即点击“提交”重试一次，通常第二次会成功'
+            });
+        } else {
+            res.status(500).json({ success: false, message: err.message });
         }
-        // 其他错误
-        res.status(500).json({ success: false, message: err.message });
     }
 });
+
+async function performAppend(name, phone) {
+    if (!csrfToken) {
+        console.log('Token 为空，先登录');
+        await login();
+    }
+
+    let doc;
+    try {
+        doc = await fetchDocument(true);
+    } catch (err) {
+        if (err.message.includes('401') || err.message.includes('CSRF')) {
+            console.log('Token 失效，重新登录...');
+            await login();
+            doc = await fetchDocument(false);
+        } else {
+            throw err;
+        }
+    }
+
+    const { contents, originalContents } = doc;
+    if (!Array.isArray(contents.whitelist)) contents.whitelist = [];
+    contents.whitelist.push({
+        name,
+        phone,
+        timestamp: new Date().toISOString(),
+    });
+
+    const newContentsStr = JSON.stringify(contents);
+    const payload = {
+        contents: newContentsStr,
+        original_contents: originalContents,
+        schema: null,
+        original_schema: '',
+    };
+
+    console.log('📤 更新文档...');
+    const patchResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
+        method: 'PATCH',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify(payload),
+    });
+    if (!patchResp.ok) {
+        const text = await patchResp.text();
+        throw new Error(`更新失败 (${patchResp.status}): ${text}`);
+    }
+    const result = await patchResp.json();
+    cachedContents = contents;
+    cachedOriginalContents = originalContents;
+    console.log('✅ 更新成功');
+    return result;
+}
 
 exports.handler = serverless(app);
