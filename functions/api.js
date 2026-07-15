@@ -30,6 +30,7 @@ async function login() {
     return token;
 }
 
+// ---------- 初始化 ----------
 app.get('/api/init', async (req, res) => {
     try {
         await login();
@@ -47,14 +48,19 @@ app.get('/api/init', async (req, res) => {
     }
 });
 
+// ---------- 追加白名单（含重试） ----------
 app.post('/api/append', async (req, res) => {
     const { name, phone } = req.body;
     if (!name || !phone) {
         return res.status(400).json({ success: false, message: '姓名和手机号不能为空' });
     }
-    try {
+
+    // 核心操作函数，可重复调用
+    async function performAppend(attempt = 1) {
+        // 如果 token 不存在，先登录
         if (!csrfToken) await login();
 
+        // 1. 获取当前文档
         const getResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
             headers: { 'x-csrf-token': csrfToken, 'Accept': 'application/json' },
         });
@@ -81,6 +87,7 @@ app.post('/api/append', async (req, res) => {
             original_schema: '',
         };
 
+        // 2. 更新文档
         const patchResp = await fetch(`${CONFIG.baseUrl}/documents/${CONFIG.docId}`, {
             method: 'PATCH',
             headers: {
@@ -95,16 +102,30 @@ app.post('/api/append', async (req, res) => {
             throw new Error(`更新失败 (${patchResp.status}): ${text}`);
         }
         const result = await patchResp.json();
+        return result;
+    }
+
+    try {
+        const result = await performAppend();
         res.json({ success: true, data: result });
     } catch (err) {
-        if (err.message.includes('CSRF') || err.message.includes('401')) {
+        // 如果错误是认证相关 (401 或 CSRF)，尝试重新登录并重试一次
+        const errMsg = err.message;
+        if (errMsg.includes('401') || errMsg.includes('CSRF') || errMsg.includes('获取文档失败')) {
             try {
-                await login();
-                return res.status(401).json({ success: false, message: '认证已刷新，请重试' });
-            } catch (e) {
-                return res.status(500).json({ success: false, message: `重试失败: ${e.message}` });
+                console.log('认证失败，重新登录并重试...');
+                await login(); // 重新登录
+                // 重试一次
+                const result = await performAppend();
+                res.json({ success: true, data: result });
+                return;
+            } catch (retryErr) {
+                // 重试仍然失败，返回错误
+                res.status(500).json({ success: false, message: `重试失败: ${retryErr.message}` });
+                return;
             }
         }
+        // 其他错误
         res.status(500).json({ success: false, message: err.message });
     }
 });
